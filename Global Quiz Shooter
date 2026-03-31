@@ -1,0 +1,487 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, doc, setDoc, getDoc, onSnapshot, 
+  collection, updateDoc, deleteDoc, arrayUnion 
+} from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { Heart, Users, Trophy, Coins, Globe, ArrowRight, ShieldAlert, Rocket, Settings, Plus, Send } from 'lucide-react';
+
+// --- CONFIGURATION & INITIALIZATION ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'global-quiz-shooter-v1';
+
+const LANGUAGES = {
+  id: {
+    name: 'Bahasa Indonesia',
+    flag: '🇮🇩',
+    welcome: 'Selamat Datang di Global Quiz Shooter',
+    createRoom: 'Buat Squad Baru',
+    joinRoom: 'Gabung Squad',
+    enterCode: 'Masukkan 6 Digit Kode',
+    start: 'Mulai Game',
+    difficulty: 'Pilih Kesulitan',
+    health: 'Nyawa Tim',
+    score: 'Skor',
+    gameOver: 'Game Over!',
+    victory: 'Kemenangan Squad!',
+    typing: 'Ketik jawaban untuk menembak!',
+    diffNames: { easy: 'MUDAH', normal: 'NORMAL', hard: 'KERAS', legends: 'LEGENDS' }
+  },
+  en: {
+    name: 'English',
+    flag: '🇺🇸',
+    welcome: 'Welcome to Global Quiz Shooter',
+    createRoom: 'Create New Squad',
+    joinRoom: 'Join Squad',
+    enterCode: 'Enter 6-Digit Code',
+    start: 'Start Game',
+    difficulty: 'Select Difficulty',
+    health: 'Squad Health',
+    score: 'Score',
+    gameOver: 'Game Over!',
+    victory: 'Squad Victory!',
+    typing: 'Type answer to shoot!',
+    diffNames: { easy: 'EASY', normal: 'NORMAL', hard: 'HARD', legends: 'LEGENDS' }
+  },
+  ru: {
+    name: 'Русский',
+    flag: '🇷🇺',
+    welcome: 'Добро пожаловать в Global Quiz Shooter',
+    createRoom: 'Создать новый отряд',
+    joinRoom: 'Присоединиться к отряду',
+    enterCode: 'Введите 6-значный код',
+    start: 'Начать игру',
+    difficulty: 'Выберите сложность',
+    health: 'Здоровье отряда',
+    score: 'Счет',
+    gameOver: 'Игра окончена!',
+    victory: 'Победа отряда!',
+    typing: 'Введите ответ, чтобы стрелять!',
+    diffNames: { easy: 'ЛЕГКО', normal: 'НОРМАЛЬНО', hard: 'ТРУДНО', legends: 'ЛЕГЕНДЫ' }
+  }
+};
+
+const QUIZ_BANK = {
+  id: [
+    { q: '2 + 2', a: '4' }, { q: 'Ibu kota Indonesia', a: 'jakarta' }, { q: 'Warna bendera RI', a: 'merah putih' },
+    { q: 'Planet Merah', a: 'mars' }, { q: 'Hewan terpintar', a: 'simpanse' }, { q: 'Lawan kata besar', a: 'kecil' }
+  ],
+  en: [
+    { q: '2 + 2', a: '4' }, { q: 'Capital of UK', a: 'london' }, { q: 'Color of grass', a: 'green' },
+    { q: 'Red Planet', a: 'mars' }, { q: 'Fastest animal', a: 'cheetah' }, { q: 'Opposite of hot', a: 'cold' }
+  ],
+  ru: [
+    { q: '2 + 2', a: '4' }, { q: 'Столица России', a: 'москва' }, { q: 'Цвет неба', a: 'голубой' },
+    { q: 'Красная планета', a: 'марс' }, { q: 'Царь зверей', a: 'лев' }, { q: 'Противоположность холода', a: 'тепло' }
+  ]
+};
+
+// --- MAIN APP COMPONENT ---
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [lang, setLang] = useState('id');
+  const [gameState, setGameState] = useState('lobby'); // lobby, joining, squad_wait, playing, gameover
+  const [roomCode, setRoomCode] = useState('');
+  const [roomData, setRoomData] = useState(null);
+  const [coins, setCoins] = useState(0);
+  const [inputCode, setInputCode] = useState('');
+  const [error, setError] = useState('');
+
+  const t = LANGUAGES[lang];
+
+  // Auth initialization
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (err) {
+        console.error("Auth Error", err);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, (u) => setUser(u));
+  }, []);
+
+  // Listen to Room Updates
+  useEffect(() => {
+    if (!roomCode || !user) return;
+    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode);
+    const unsubscribe = onSnapshot(roomRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setRoomData(data);
+        if (data.status === 'playing' && gameState !== 'playing') {
+          setGameState('playing');
+        }
+      } else {
+        setGameState('lobby');
+        setRoomCode('');
+      }
+    }, (err) => setError("Koneksi gagal: " + err.message));
+
+    return () => unsubscribe();
+  }, [roomCode, user]);
+
+  const createRoom = async () => {
+    if (!user) return;
+    const newCode = Math.random().toString().substring(2, 8);
+    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', newCode);
+    const initialData = {
+      code: newCode,
+      host: user.uid,
+      players: [user.uid],
+      status: 'waiting',
+      health: 3,
+      score: 0,
+      round: 1,
+      difficulty: 'normal',
+      language: lang,
+      createdAt: Date.now()
+    };
+    await setDoc(roomRef, initialData);
+    setRoomCode(newCode);
+    setGameState('squad_wait');
+  };
+
+  const joinRoom = async () => {
+    if (!user || inputCode.length !== 6) return;
+    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', inputCode);
+    const snap = await getDoc(roomRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data.players.length >= 4) {
+        setError("Squad Penuh!");
+        return;
+      }
+      await updateDoc(roomRef, {
+        players: arrayUnion(user.uid)
+      });
+      setRoomCode(inputCode);
+      setGameState('squad_wait');
+      setLang(data.language);
+    } else {
+      setError("Kode tidak valid");
+    }
+  };
+
+  const startGame = async () => {
+    if (roomData?.host !== user.uid) return;
+    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode);
+    await updateDoc(roomRef, { status: 'playing' });
+  };
+
+  const handleGameOver = (finalScore) => {
+    setCoins(prev => prev + Math.floor(finalScore / 10));
+    setGameState('gameover');
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500/30 overflow-hidden">
+      {/* UI Overlay */}
+      <div className="fixed top-0 left-0 right-0 p-4 flex justify-between items-center z-50 pointer-events-none">
+        <div className="flex gap-4 pointer-events-auto">
+          <div className="bg-slate-900/80 backdrop-blur-md border border-slate-700 px-4 py-2 rounded-2xl flex items-center gap-2">
+            <Coins className="text-yellow-400 w-5 h-5" />
+            <span className="font-bold">{coins}</span>
+          </div>
+          {roomCode && (
+            <div className="bg-indigo-600/90 backdrop-blur-md px-4 py-2 rounded-2xl flex items-center gap-2">
+              <Users className="w-5 h-5" />
+              <span className="font-mono font-bold tracking-widest">{roomCode}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="pointer-events-auto">
+          <select 
+            value={lang} 
+            onChange={(e) => setLang(e.target.value)}
+            disabled={gameState !== 'lobby'}
+            className="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 outline-none focus:ring-2 ring-indigo-500 cursor-pointer"
+          >
+            {Object.entries(LANGUAGES).map(([key, val]) => (
+              <option key={key} value={key}>{val.flag} {val.name}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Main Container */}
+      <main className="h-screen flex flex-col items-center justify-center p-6">
+        {gameState === 'lobby' && (
+          <div className="max-w-md w-full space-y-8 animate-in fade-in zoom-in duration-500">
+            <div className="text-center space-y-4">
+              <div className="w-20 h-20 bg-indigo-600 rounded-3xl mx-auto flex items-center justify-center shadow-xl shadow-indigo-500/20 rotate-3 hover:rotate-0 transition-transform">
+                <Rocket className="w-12 h-12 text-white" />
+              </div>
+              <h1 className="text-4xl font-black tracking-tight">{t.welcome}</h1>
+            </div>
+
+            <div className="space-y-4">
+              <button 
+                onClick={createRoom}
+                className="w-full bg-indigo-600 hover:bg-indigo-500 p-6 rounded-3xl font-bold text-xl flex items-center justify-between group transition-all transform active:scale-95"
+              >
+                <span>{t.createRoom}</span>
+                <Plus className="group-hover:rotate-90 transition-transform" />
+              </button>
+
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-800"></div></div>
+                <div className="relative flex justify-center text-sm"><span className="px-4 bg-slate-950 text-slate-500">ATAU</span></div>
+              </div>
+
+              <div className="space-y-2">
+                <input 
+                  type="text" 
+                  maxLength={6}
+                  placeholder={t.enterCode}
+                  value={inputCode}
+                  onChange={(e) => setInputCode(e.target.value.toUpperCase())}
+                  className="w-full bg-slate-900 border-2 border-slate-800 focus:border-indigo-500 p-4 rounded-2xl text-center font-mono text-2xl tracking-[0.5em] outline-none transition-all"
+                />
+                <button 
+                  onClick={joinRoom}
+                  className="w-full bg-slate-800 hover:bg-slate-700 p-4 rounded-2xl font-bold transition-all"
+                >
+                  {t.joinRoom}
+                </button>
+              </div>
+            </div>
+
+            {error && <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-xl text-center text-sm">{error}</div>}
+          </div>
+        )}
+
+        {gameState === 'squad_wait' && roomData && (
+          <div className="max-w-2xl w-full bg-slate-900/50 backdrop-blur-xl border border-slate-800 p-8 rounded-[2rem] space-y-8 animate-in slide-in-from-bottom-10">
+            <div className="flex justify-between items-end">
+              <div>
+                <p className="text-slate-400 text-sm uppercase font-bold tracking-widest mb-1">Squad Lobby</p>
+                <h2 className="text-3xl font-black">Menunggu Pemain...</h2>
+              </div>
+              <div className="text-right">
+                <div className="text-4xl font-mono font-black text-indigo-500">{roomData.code}</div>
+                <p className="text-xs text-slate-500">Berikan kode ini ke temanmu</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {[0, 1, 2, 3].map(i => {
+                const p = roomData.players[i];
+                return (
+                  <div key={i} className={`h-24 rounded-2xl border-2 flex items-center justify-center gap-3 transition-all ${p ? 'bg-indigo-500/10 border-indigo-500 text-indigo-100' : 'bg-slate-800/50 border-slate-800 border-dashed text-slate-600'}`}>
+                    {p ? (
+                      <>
+                        <div className="w-10 h-10 bg-indigo-500 rounded-full flex items-center justify-center font-bold">
+                          {i + 1}
+                        </div>
+                        <div className="font-mono text-sm">
+                          {p === user.uid ? "KAMU (READY)" : `PLAYER ${p.substring(0, 4)}`}
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-xs font-bold">SLOT KOSONG</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {roomData.host === user.uid ? (
+              <button 
+                onClick={startGame}
+                disabled={roomData.players.length < 1}
+                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 p-6 rounded-2xl font-black text-xl flex items-center justify-center gap-3 transition-all"
+              >
+                <ArrowRight /> {t.start}
+              </button>
+            ) : (
+              <p className="text-center text-slate-400 animate-pulse">Menunggu Host memulai permainan...</p>
+            )}
+          </div>
+        )}
+
+        {gameState === 'playing' && roomData && (
+          <GameEngine 
+            roomData={roomData} 
+            user={user} 
+            lang={lang} 
+            onGameOver={handleGameOver}
+            t={t}
+          />
+        )}
+
+        {gameState === 'gameover' && (
+          <div className="text-center space-y-6 animate-in zoom-in">
+            <h2 className="text-6xl font-black text-red-500">{t.gameOver}</h2>
+            <div className="bg-slate-900 p-8 rounded-3xl border border-slate-800 space-y-4">
+              <p className="text-2xl text-slate-400">Total Skor Squad</p>
+              <p className="text-5xl font-black">{roomData?.score || 0}</p>
+            </div>
+            <button 
+              onClick={() => setGameState('lobby')}
+              className="px-10 py-4 bg-indigo-600 rounded-2xl font-bold hover:scale-105 transition-transform"
+            >
+              Kembali Ke Menu
+            </button>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+// --- GAME CORE ENGINE ---
+function GameEngine({ roomData, user, lang, onGameOver, t }) {
+  const canvasRef = useRef(null);
+  const [answer, setAnswer] = useState('');
+  const [currentQuestion, setCurrentQuestion] = useState(null);
+  const [localScore, setLocalScore] = useState(0);
+  const objectsRef = useRef([]); // Fallback obstacles
+  const frameRef = useRef();
+
+  // Load new question
+  const getNewQuestion = () => {
+    const bank = QUIZ_BANK[lang];
+    const q = bank[Math.floor(Math.random() * bank.length)];
+    setCurrentQuestion({ ...q, x: Math.random() * 80 + 10, y: -50, speed: 1.5 + (roomData.score / 100) });
+  };
+
+  useEffect(() => {
+    getNewQuestion();
+    
+    // Canvas Game Loop (Client Side Visuals)
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    const animate = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      if (currentQuestion) {
+        // Draw Question Obstacle
+        ctx.fillStyle = '#4f46e5';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#6366f1';
+        
+        // Rect rounded
+        const rectW = 200;
+        const rectH = 80;
+        const x = (currentQuestion.x / 100) * canvas.width - rectW/2;
+        const y = currentQuestion.y;
+        
+        ctx.beginPath();
+        ctx.roundRect(x, y, rectW, rectH, 20);
+        ctx.fill();
+        
+        // Text
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 20px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(currentQuestion.q, x + rectW/2, y + 45);
+        
+        // Movement
+        currentQuestion.y += currentQuestion.speed;
+        
+        // Collision with bottom
+        if (currentQuestion.y > canvas.height) {
+          handleMiss();
+        }
+      }
+      
+      frameRef.current = requestAnimationFrame(animate);
+    };
+
+    animate();
+    return () => cancelAnimationFrame(frameRef.current);
+  }, [currentQuestion]);
+
+  const handleMiss = async () => {
+    const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomData.code);
+    const newHealth = roomData.health - 1;
+    if (newHealth <= 0) {
+      onGameOver(roomData.score);
+      await deleteDoc(roomRef);
+    } else {
+      await updateDoc(roomRef, { health: newHealth });
+      getNewQuestion();
+    }
+  };
+
+  const handleInput = async (e) => {
+    const val = e.target.value.toLowerCase();
+    setAnswer(val);
+
+    if (currentQuestion && val === currentQuestion.a.toLowerCase()) {
+      // Score animation & sound could go here
+      const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomData.code);
+      await updateDoc(roomRef, { score: roomData.score + 10 });
+      setAnswer('');
+      getNewQuestion();
+    }
+  };
+
+  return (
+    <div className="relative w-full h-full flex flex-col items-center">
+      {/* Game HUD */}
+      <div className="absolute top-0 w-full flex justify-between items-center p-4">
+        <div className="flex gap-2">
+          {[...Array(3)].map((_, i) => (
+            <Heart 
+              key={i} 
+              className={`w-8 h-8 ${i < roomData.health ? 'text-red-500 fill-red-500' : 'text-slate-700'}`} 
+            />
+          ))}
+        </div>
+        <div className="text-center">
+          <p className="text-xs text-slate-500 uppercase tracking-widest font-bold">{t.score}</p>
+          <p className="text-4xl font-black text-indigo-400">{roomData.score}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-slate-500 uppercase tracking-widest font-bold">Squad</p>
+          <p className="text-xl font-mono">{roomData.players.length}/4</p>
+        </div>
+      </div>
+
+      {/* Canvas Layer */}
+      <canvas 
+        ref={canvasRef} 
+        width={800} 
+        height={600} 
+        className="w-full h-[70vh] max-w-4xl bg-slate-900/30 rounded-[3rem] border border-slate-800/50 mb-8"
+      />
+
+      {/* Input Area */}
+      <div className="w-full max-w-xl space-y-4 animate-in slide-in-from-bottom-5">
+        <p className="text-center text-slate-500 text-sm italic font-medium">{t.typing}</p>
+        <div className="relative group">
+          <input 
+            autoFocus
+            type="text" 
+            value={answer}
+            onChange={handleInput}
+            className="w-full bg-slate-900 border-2 border-slate-700 focus:border-indigo-500 p-6 rounded-3xl text-center text-2xl font-bold outline-none shadow-2xl transition-all"
+            placeholder="..."
+          />
+          <div className="absolute right-4 top-1/2 -translate-y-1/2 opacity-50 group-focus-within:opacity-100 transition-opacity">
+            <Send className="text-indigo-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile Touch Support (Optional Indicator) */}
+      <div className="mt-4 flex gap-4 text-[10px] text-slate-600 uppercase tracking-tighter font-bold">
+        <span>SQUAD SYNC ACTIVE</span>
+        <span>•</span>
+        <span>LATENCY OPTIMIZED</span>
+        <span>•</span>
+        <span>ENCRYPTED LOBBY</span>
+      </div>
+    </div>
+  );
+}
